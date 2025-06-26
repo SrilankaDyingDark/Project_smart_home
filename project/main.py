@@ -18,7 +18,6 @@ models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
-# 依赖项: 获取数据库会话
 def get_db():
     db = SessionLocal()
     try:
@@ -188,7 +187,7 @@ def delete_feedback(feedback_id: int, db: Session = Depends(get_db)):
     return {"detail": "Feedback deleted"}
 
 # ------------------ 分析 API ------------------ #
-
+# ------------------ 3 ------------------ #
 def classify_correlation(corr: float) -> str:
     """将皮尔逊系数转化为语言描述"""
     if abs(corr) > 0.7:
@@ -255,7 +254,7 @@ def analyze_area_vs_usage(db: Session = Depends(get_db)):
         for label, usages in area_groups.items()
     }
 
-    # 异常用户识别（大面积但使用低，或小面积使用极高）
+    # 异常用户识别
     usage_mean = np.mean(usages)
     usage_std = np.std(usages)
     threshold_low = usage_mean - 1.2 * usage_std
@@ -284,76 +283,60 @@ def analyze_area_vs_usage(db: Session = Depends(get_db)):
         },
         "group_analysis": area_stats,
         "outliers": outliers,
-        "raw_data": data # # 返回原始数据可供前端绘图
+        "raw_data": data
     }
 
-# ------------------ 自行设计子问题 ------------------ #
-@app.get("/analysis/active-hours")
-def analyze_active_hours(db: Session = Depends(get_db)):
-    from collections import Counter
-
-    logs = db.query(models.UsageLog).all()
-    hour_count = Counter()
-
-    for log in logs:
-        hour = log.start_time.hour
-        hour_count[hour] += 1
-
-    sorted_data = sorted(hour_count.items())  # [(0, 2), (1, 5), ..., (23, 7)]
-    return {"hourly_usage": sorted_data}
-
-@app.get("/analysis/device-type-duration")
-def analyze_device_type_duration(db: Session = Depends(get_db)):
-    from collections import defaultdict
-
-    durations = defaultdict(list)
-    devices = db.query(models.Device).all()
-    device_type_map = {d.id: d.type for d in devices}
-
-    logs = db.query(models.UsageLog).all()
-    for log in logs:
-        device_type = device_type_map.get(log.device_id)
-        if device_type:
-            duration = (log.finish_time - log.start_time).total_seconds() / 60  # 转为分钟
-            durations[device_type].append(duration)
-
-    avg_durations = {
-        dtype: sum(times) / len(times) if times else 0
-        for dtype, times in durations.items()
-    }
-
-    return {"average_durations": avg_durations}
-
-@app.post("/auto-alarm-check", response_model=list[schemas.SecurityEventWithDetails])
+# ------------------ 4.自行设计子问题 ------------------ #
+@app.get("/auto-alarm-check", response_model=list[schemas.SecurityEventWithDetails])
 def auto_alarm_check(db: Session = Depends(get_db)):
     logs = db.query(models.UsageLog).all()
     alerts = []
 
+    abnormal_hours = list(range(0, 5))
+    suspicious_device_types = ["door_lock", "security_camera"]
+    
     for log in logs:
-        if log.start_time.hour < 5:  # 异常时间段
-            user = db.query(models.User).get(log.user_id)
-            device = db.query(models.Device).get(log.device_id)
-            message = f"⚠️ 异常时段使用设备：{device.name} by {user.name}"
+        user = db.query(models.User).get(log.user_id)
+        device = db.query(models.Device).get(log.device_id)
 
+        reasons = []
+        if log.start_time.hour in abnormal_hours:
+            reasons.append("异常时段使用")
+        if device.type in suspicious_device_types:
+            reasons.append("可疑设备类型")
+        if (log.finish_time - log.start_time).total_seconds() > 3600:  # 使用超过1小时
+            reasons.append("长时间使用")
+        
+        if reasons:
+            message = f"⚠️ 检测到异常: {' & '.join(reasons)} - 设备: {device.name} (用户: {user.name})"
+            
             event = models.SecurityEvent(
                 user_id=log.user_id,
                 event=message,
-                severity="warning",
+                severity="warning" if len(reasons) < 2 else "critical",
                 timestamp=datetime.utcnow()
             )
             db.add(event)
-
+            db.flush() 
+            
             alerts.append(schemas.SecurityEventWithDetails(
-                id=None,
+                id=event.id,
                 user_id=log.user_id,
                 event=message,
-                severity="warning",
+                severity=event.severity,
                 timestamp=event.timestamp,
                 user_name=user.name,
-                device_name=device.name
+                device_name=device.name,
+                device_type=device.type,
+                start_time=log.start_time,
+                duration_minutes=round((log.finish_time - log.start_time).total_seconds() / 60, 1),
+                reasons=reasons
             ))
 
     db.commit()
+
+    severity_order = {"critical": 0, "warning": 1}
+    alerts.sort(key=lambda x: severity_order.get(x.severity, 2))
     return alerts
 
 # uvicorn main:app --reload --port 8080

@@ -61,6 +61,10 @@ class SecurityEventWithDetails(SecurityEventBase):
     severity: str
     user_name: str
     device_name: str
+    device_type: str
+    start_time: datetime
+    duration_minutes: float
+    reasons: list[str]
 
     class Config:
         from_attributes = True
