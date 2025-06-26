@@ -187,6 +187,85 @@ def delete_feedback(feedback_id: int, db: Session = Depends(get_db)):
     return {"detail": "Feedback deleted"}
 
 # ------------------ 分析 API ------------------ #
+# ------------------ 设备使用频率及时间段分析接口 ------------------ #
+@app.get("/analysis/device-usage")
+def analyze_device_usage(db: Session = Depends(get_db)):
+    usage_logs = db.query(models.UsageLog).all()
+    devices = db.query(models.Device).all()
+    device_map = {device.id: device.name for device in devices}
+
+    daily_usage_freq = defaultdict(lambda: defaultdict(int))
+    hourly_distribution = defaultdict(lambda: defaultdict(int))
+
+    for log in usage_logs:
+        device_name = device_map.get(log.device_id, "Unknown")
+
+        if log.start_time:
+            day = log.start_time.date()
+            daily_usage_freq[device_name][str(day)] += 1
+
+        # 小时分布
+        if log.start_time and log.finish_time:
+            start_hour = log.start_time.hour
+            end_hour = log.finish_time.hour
+            for hour in range(start_hour, end_hour + 1):
+                hourly_distribution[device_name][hour] += 1
+
+    # 计算每天平均使用频率
+    average_daily_freq = {}
+    for device, day_counts in daily_usage_freq.items():
+        total_usage = sum(day_counts.values())
+        num_days = len(day_counts)
+        average = total_usage / num_days if num_days else 0
+        average_daily_freq[device] = round(average, 2)
+
+    result = {
+        "daily_usage_frequency": {
+            device: dict(date_counts) for device, date_counts in daily_usage_freq.items()
+        },
+        "average_daily_frequency": average_daily_freq,
+        "hourly_distribution": {
+            device: dict(hour_dist) for device, hour_dist in hourly_distribution.items()
+        }
+    }
+    return result
+
+# ------------------ 设备同时使用情况分析接口 ------------------ #
+from sqlalchemy import and_
+
+@app.get("/analysis/device-cousage")
+def analyze_device_cousage(db: Session = Depends(get_db)):
+    logs = db.query(models.UsageLog).all()
+    device_map = {device.id: device.name for device in db.query(models.Device).all()}
+
+    co_usage = defaultdict(lambda: defaultdict(int))
+
+    user_logs = defaultdict(list)
+    for log in logs:
+        user_logs[log.user_id].append(log)
+
+    for logs_per_user in user_logs.values():
+        # 按开始时间排序
+        logs_per_user.sort(key=lambda x: x.start_time)
+        n = len(logs_per_user)
+
+        for i in range(n):
+            for j in range(i + 1, n):
+                log1 = logs_per_user[i]
+                log2 = logs_per_user[j]
+
+                # 判断是否时间重叠（存在交集）
+                if log1.finish_time >= log2.start_time and log2.finish_time >= log1.start_time:
+                    name1 = device_map.get(log1.device_id, f"Device {log1.device_id}")
+                    name2 = device_map.get(log2.device_id, f"Device {log2.device_id}")
+                    if name1 != name2:
+                        co_usage[name1][name2] += 1
+                        co_usage[name2][name1] += 1 
+
+    # 将 defaultdict 转为普通 dict 输出
+    result = {k: dict(v) for k, v in co_usage.items()}
+    return {"co_usage": result}
+
 # ------------------ 3 ------------------ #
 def classify_correlation(corr: float) -> str:
     """将皮尔逊系数转化为语言描述"""
